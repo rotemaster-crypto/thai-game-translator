@@ -17,26 +17,30 @@ jobs:
         with:
           gradle-version: '8.7'
       - name: Build
-        run: gradle --no-daemon assembleRelease 2>&1 | tee build.log
-      - name: Collect
+        run: |
+          set -o pipefail
+          gradle --no-daemon assembleRelease 2>&1 | tee build.log
+      - name: Report
         if: always()
         run: |
+          grep -E "^e: |error:|What went wrong" -A2 build.log | head -40 | while IFS= read -r l; do echo "::error::$l"; done || true
           mkdir -p out
           cp build.log out/ || true
-          cp app/build/outputs/apk/release/*.apk out/ThaiGameTranslator.apk 2>/dev/null || true
-          ls -la out
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: apk
-          path: out/
+          cp app/build/outputs/apk/release/*.apk out/ThaiGameTranslator.apk 2>/dev/null && echo "::notice::APK $(du -h out/ThaiGameTranslator.apk | cut -f1)" || echo "::error::no apk"
       - name: Publish APK to build-output branch
         if: always()
         run: |
+          set +e
           cd out
-          git init -q -b build-output
+          git init -q
+          git checkout -q -b build-output
           git config user.name "build-bot"
           git config user.email "build-bot@users.noreply.github.com"
           git add -A
           git commit -q -m "build ${GITHUB_SHA}"
-          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" build-output
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" build-output > push.log 2>&1
+          rc=$?
+          while IFS= read -r l; do echo "::warning::PUSH $l"; done < push.log
+          exit $rc
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
