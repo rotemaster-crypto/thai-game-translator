@@ -57,7 +57,7 @@ class MainActivity : Activity() {
         setContentView(scroll)
 
         text("แปลเกมเป็นภาษาไทย + พากย์เสียง", 22f, green, bold = true)
-        text("ใช้ได้กับทุก emulator (RetroArch, mGBA, DuckStation, Pizza Boy ฯลฯ) — อ่านข้อความบนจอ แปลไทย แสดงซับ และพูดให้ฟัง", 14f, Color.LTGRAY)
+        text("ใช้ได้กับทุก emulator (RetroArch, Pizza Boy, DuckStation, PS2 emulator ฯลฯ) — อ่านข้อความบนจอ แปลไทย แสดงซับ และพูดให้ฟัง", 14f, Color.LTGRAY)
         status = text("", 14f, Color.WHITE)
 
         // ---- big buttons
@@ -83,6 +83,10 @@ class MainActivity : Activity() {
             p.edit().putInt(Prefs.SUB_SIZE, it.toInt()).apply()
         }
         switch("พากย์เสียงภาษาไทย", Prefs.VOICE, true)
+        spinner("เสียงเกมตอนพากย์ไทย", Prefs.DUCK, listOf(
+            "duck" to "หรี่เสียงเกมลง (แนะนำ)",
+            "mute" to "ปิดเสียงเกมชั่วคราว",
+            "off" to "ไม่ยุ่งกับเสียงเกม"), "duck")
         switch("เริ่มด้วยโหมดแปลอัตโนมัติ", Prefs.AUTO, true)
         label("ความเร็วเสียงพูด")
         root.addView(SeekBar(this).apply {

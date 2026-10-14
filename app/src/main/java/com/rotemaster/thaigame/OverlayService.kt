@@ -18,6 +18,9 @@ import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
@@ -28,6 +31,7 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.DisplayMetrics
 import android.util.TypedValue
 import android.view.Gravity
@@ -71,6 +75,12 @@ class OverlayService : Service() {
 
     private var tts: TextToSpeech? = null
     private var ttsOk = false
+    private lateinit var audio: AudioManager
+    private var focusReq: AudioFocusRequest? = null
+    private val speechAttrs = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+        .build()
     private var ocr: Ocr? = null
     private var ocrLang = ""
     private lateinit var translator: ThaiTranslator
@@ -95,6 +105,7 @@ class OverlayService : Service() {
 
         running = true
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        audio = getSystemService(AUDIO_SERVICE) as AudioManager
         translator = ThaiTranslator(this)
         val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         projection = mpm.getMediaProjection(code, data)
@@ -107,6 +118,14 @@ class OverlayService : Service() {
             ttsOk = status == TextToSpeech.SUCCESS &&
                 (tts?.setLanguage(Locale("th", "TH")) ?: TextToSpeech.LANG_NOT_SUPPORTED) >= 0
             if (!ttsOk) toast("ยังไม่มีเสียงพูดภาษาไทย — ตั้งค่าในแอปหน้าแรก")
+            tts?.setAudioAttributes(speechAttrs)
+            tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(id: String?) {}
+                override fun onDone(id: String?) { releaseFocus() }
+                @Deprecated("Deprecated in Java")
+                override fun onError(id: String?) { releaseFocus() }
+                override fun onStop(id: String?, interrupted: Boolean) { if (!interrupted) releaseFocus() }
+            })
         }
         auto = Prefs.get(this).getBoolean(Prefs.AUTO, true)
         updateBubble()
@@ -237,6 +256,7 @@ class OverlayService : Service() {
             main.post { showSubtitle(text) }
             if (p.getBoolean(Prefs.VOICE, true) && ttsOk) {
                 tts?.setSpeechRate(p.getInt(Prefs.RATE, 11) / 10f)
+                requestFocus(p.getString(Prefs.DUCK, "duck")!!)
                 tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "line")
             }
         } catch (e: Exception) {
@@ -335,6 +355,26 @@ class OverlayService : Service() {
         s.visibility = View.VISIBLE
     }
 
+    /** Lower (duck) or pause the game's sound while the Thai voice speaks; restored when speech ends. */
+    private fun requestFocus(mode: String) {
+        if (mode == "off") return
+        val gain = if (mode == "mute") AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
+                   else AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+        val req = AudioFocusRequest.Builder(gain)
+            .setAudioAttributes(speechAttrs)
+            .setWillPauseWhenDucked(false)
+            .setOnAudioFocusChangeListener { }
+            .build()
+        focusReq?.let { audio.abandonAudioFocusRequest(it) }
+        focusReq = req
+        audio.requestAudioFocus(req)
+    }
+
+    private fun releaseFocus() {
+        focusReq?.let { audio.abandonAudioFocusRequest(it) }
+        focusReq = null
+    }
+
     private fun toast(msg: String) = main.post { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
 
     override fun onDestroy() {
@@ -344,6 +384,7 @@ class OverlayService : Service() {
         if (::wm.isInitialized) for (v in listOf<View?>(bubble, subtitle)) try { if (v != null) wm.removeView(v) } catch (_: Exception) {}
         bubble = null; subtitle = null
         tts?.stop(); tts?.shutdown()
+        if (::audio.isInitialized) releaseFocus()
         display?.release()
         projection?.stop()
         synchronized(frameLock) { latest?.close(); latest = null }

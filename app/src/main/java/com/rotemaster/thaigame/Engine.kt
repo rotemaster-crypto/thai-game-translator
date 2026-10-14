@@ -35,6 +35,7 @@ object Prefs {
     const val AUTO = "auto"
     const val INTERVAL = "interval"    // ms
     const val SUB_SIZE = "sub_size"    // sp
+    const val DUCK = "duck"            // duck | mute | off  (game sound while Thai voice speaks)
 
     fun get(ctx: Context): SharedPreferences = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
 }
