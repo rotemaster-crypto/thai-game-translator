@@ -30,8 +30,6 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
 import android.util.DisplayMetrics
 import android.util.TypedValue
 import android.view.Gravity
@@ -40,7 +38,6 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
-import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
@@ -73,8 +70,7 @@ class OverlayService : Service() {
     private lateinit var bubbleLp: WindowManager.LayoutParams
     private lateinit var subLp: WindowManager.LayoutParams
 
-    private var tts: TextToSpeech? = null
-    private var ttsOk = false
+    private var speech: Speech? = null
     private lateinit var audio: AudioManager
     private var focusReq: AudioFocusRequest? = null
     private val speechAttrs = AudioAttributes.Builder()
@@ -90,6 +86,7 @@ class OverlayService : Service() {
     private var lastSig: IntArray? = null
     private var stable = 0
     private var lastKey = ""
+    @Volatile private var hiddenForCapture = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -114,19 +111,7 @@ class OverlayService : Service() {
         }, main)
         startCapture()
         addOverlays()
-        tts = TextToSpeech(this) { status ->
-            ttsOk = status == TextToSpeech.SUCCESS &&
-                (tts?.setLanguage(Locale("th", "TH")) ?: TextToSpeech.LANG_NOT_SUPPORTED) >= 0
-            if (!ttsOk) toast("ยังไม่มีเสียงพูดภาษาไทย — ตั้งค่าในแอปหน้าแรก")
-            tts?.setAudioAttributes(speechAttrs)
-            tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(id: String?) {}
-                override fun onDone(id: String?) { releaseFocus() }
-                @Deprecated("Deprecated in Java")
-                override fun onError(id: String?) { releaseFocus() }
-                override fun onStop(id: String?, interrupted: Boolean) { if (!interrupted) releaseFocus() }
-            })
-        }
+        speech = Speech(this, speechAttrs, onDone = { releaseFocus() }, onError = { toast(it) })
         auto = Prefs.get(this).getBoolean(Prefs.AUTO, true)
         updateBubble()
         if (auto) scheduleTick()
@@ -173,6 +158,27 @@ class OverlayService : Service() {
     }
 
     /** Current screen as bitmap, with our own overlays painted out so they are never read back. */
+    /** Hide our subtitle, wait for a fresh frame, then grab, so the game text under it can be read. */
+    private fun grabClean(): Bitmap? {
+        val sub = subtitle
+        if (sub != null && sub.visibility == View.VISIBLE) {
+            val latch = java.util.concurrent.CountDownLatch(1)
+            main.post { sub.visibility = View.INVISIBLE; hiddenForCapture = true; latch.countDown() }
+            latch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+            Thread.sleep(220)
+        }
+        return grab()
+    }
+
+    private fun restoreSubtitle() {
+        main.post {
+            if (hiddenForCapture) {
+                hiddenForCapture = false
+                if (!subtitle?.text.isNullOrEmpty()) subtitle?.visibility = View.VISIBLE
+            }
+        }
+    }
+
     private fun grab(): Bitmap? {
         val bmp: Bitmap = synchronized(frameLock) {
             val img = latest ?: return null
@@ -222,46 +228,75 @@ class OverlayService : Service() {
             lastSig = sig
             if (prev == null || changed(sig, prev)) { stable = 0; return@execute }
             stable++
-            if (stable == 1) translate(bmp, manual = false)
+            if (stable == 1) translate(null, manual = false)
         }
     }
 
     private fun translateNow() {
         worker.execute {
-            val bmp = grab()
-            if (bmp == null) { toast("ยังไม่ได้ภาพหน้าจอ ลองอีกครั้ง"); return@execute }
-            translate(bmp, manual = true)
+            translate(null, manual = true)
         }
     }
 
-    /** Runs on worker thread. */
-    private fun translate(bmp: Bitmap, manual: Boolean) {
+    /** Runs on worker thread. bmp == null: take a clean screenshot (our subtitle hidden). */
+    private fun translate(given: Bitmap?, manual: Boolean) {
         if (!busy.compareAndSet(false, true)) return
         main.post { bubble?.alpha = 0.5f }
         try {
+            val bmp = given ?: grabClean()
+            if (bmp == null) { if (manual) toast("ยังไม่ได้ภาพหน้าจอ ลองอีกครั้ง"); return }
             val p = Prefs.get(this)
-            val lang = p.getString(Prefs.LANG, "ja")!!
+            val lang = p.getString(Prefs.LANG, "en")!!
+            val engine = p.getString(Prefs.ENGINE, "google")!!
             if (ocr == null || ocrLang != lang) { ocr?.close(); ocr = Ocr(lang); ocrLang = lang }
+
+            // 1) fast on-device OCR: is there text, and is it new?
             val blocks = ocr!!.read(bmp)
-            if (blocks.isEmpty()) {
+            if (blocks.isEmpty() && !(manual && engine == "claude_vision")) {
                 if (manual) toast("ไม่พบข้อความบนจอ")
                 return
             }
-            val key = blocks.joinToString("|") { it.text }.filterNot { it.isWhitespace() }
-            if (!manual && similarity(key, lastKey) > 0.85) return   // same dialogue, OCR jitter
+            val key = blocks.joinToString("|") { it.speaker + it.text }.filterNot { it.isWhitespace() }
+            if (!manual && key.isNotEmpty() && similarity(key, lastKey) > 0.85) return   // same screen, OCR jitter
             lastKey = key
-            val engine = p.getString(Prefs.ENGINE, "google")!!
-            val thai = translator.translateAll(blocks.map { it.text }, lang, engine) { msg -> toast(msg) }
-            val text = thai.filter { it.isNotBlank() }.joinToString("\n")
-            main.post { showSubtitle(text) }
-            if (p.getBoolean(Prefs.VOICE, true) && ttsOk) {
-                tts?.setSpeechRate(p.getInt(Prefs.RATE, 11) / 10f)
+
+            // 2) translate
+            var lines: List<Line> = emptyList()
+            if (engine == "claude_vision") {
+                lines = try { translator.claudeVision(bmp) } catch (e: Exception) {
+                    toast("Claude อ่านจอไม่สำเร็จ: ${e.message} → ใช้ Google แทน"); emptyList()
+                }
+            }
+            if (lines.isEmpty() && blocks.isNotEmpty()) {
+                lines = blocks.map { Line(it.speaker, it.text) }
+                translator.translateLines(lines, lang, engine) { msg -> toast(msg) }
+            }
+            if (lines.isEmpty()) { if (manual) toast("ไม่พบบทพูดบนจอ"); return }
+
+            // 3) only new lines (old bubbles still on screen are not repeated)
+            var fresh = translator.takeNew(lines)
+            if (fresh.isEmpty()) { if (manual) fresh = lines else return }
+
+            val showNames = p.getBoolean(Prefs.NAMES, true)
+            val text = fresh.joinToString("\n") { l ->
+                val name = l.speakerTh.ifBlank { l.speaker }
+                if (showNames && name.isNotBlank()) "$name: ${l.thai}" else l.thai
+            }
+            main.post { hiddenForCapture = false; showSubtitle(text) }
+            if (p.getBoolean(Prefs.VOICE, true)) {
                 requestFocus(p.getString(Prefs.DUCK, "duck")!!)
-                tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "line")
+                speech?.speak(fresh.joinToString(" ") { it.thai }, p.getInt(Prefs.RATE, 11) / 10f,
+                    p.getString(Prefs.VOICE_SRC, "auto")!!)
             }
         } catch (e: Exception) {
             toast("แปลไม่สำเร็จ: ${e.message}")
         } finally {
+            restoreSubtitle()
+            // remember what the screen looks like now, so restoring our subtitle doesn't trigger another round
+            try {
+                Thread.sleep(250)
+                grab()?.let { lastSig = signature(it); stable = 1 }
+            } catch (_: Exception) {}
             busy.set(false)
             main.post { bubble?.alpha = 1f }
         }
@@ -383,7 +418,7 @@ class OverlayService : Service() {
         main.removeCallbacksAndMessages(null)
         if (::wm.isInitialized) for (v in listOf<View?>(bubble, subtitle)) try { if (v != null) wm.removeView(v) } catch (_: Exception) {}
         bubble = null; subtitle = null
-        tts?.stop(); tts?.shutdown()
+        speech?.shutdown()
         if (::audio.isInitialized) releaseFocus()
         display?.release()
         projection?.stop()

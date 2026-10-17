@@ -7,12 +7,12 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioAttributes
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.speech.tts.TextToSpeech
 import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
@@ -29,7 +29,6 @@ import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
-import java.util.Locale
 
 @Suppress("DEPRECATION")
 class MainActivity : Activity() {
@@ -37,8 +36,7 @@ class MainActivity : Activity() {
     private val REQ_CAPTURE = 10
     private lateinit var status: TextView
     private lateinit var root: LinearLayout
-    private var tts: TextToSpeech? = null
-    private var thaiVoice: Boolean? = null
+    private var speech: Speech? = null
 
     private val bg = Color.parseColor("#14161F")
     private val card = Color.parseColor("#1F2230")
@@ -66,28 +64,33 @@ class MainActivity : Activity() {
         row.addView(button("■  หยุด", Color.parseColor("#AA3333")) { stop() }, LinearLayout.LayoutParams(0, dp(56), 1f))
         root.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) })
 
-        // ---- settings
-        section("ตั้งค่า")
-        spinner("ภาษาในเกม", Prefs.LANG, listOf("ja" to "ญี่ปุ่น", "en" to "อังกฤษ", "zh" to "จีน", "ko" to "เกาหลี"), "ja")
+        // ---- translation quality
+        section("การแปล")
+        spinner("ภาษาในเกม", Prefs.LANG, listOf("en" to "อังกฤษ", "ja" to "ญี่ปุ่น", "zh" to "จีน", "ko" to "เกาหลี"), "en")
         spinner("แปลด้วย", Prefs.ENGINE, listOf(
-            "google" to "Google ออนไลน์ (ฟรี, แนะนำ)",
-            "mlkit" to "ออฟไลน์ในเครื่อง (ฟรี, ไม่ต้องใช้เน็ต)",
-            "claude" to "Claude AI (แปลดีที่สุด, ต้องมี API key)"), "google")
-        spinner("พื้นที่ที่อ่าน", Prefs.AREA + "_s", listOf("0" to "ทั้งจอ", "1" to "ครึ่งล่าง (กล่องข้อความ)", "2" to "1/3 ล่าง"), "0") {
-            p.edit().putInt(Prefs.AREA, it.toInt()).apply()
-        }
-        spinner("ตรวจจอทุก", Prefs.INTERVAL + "_s", listOf("500" to "0.5 วินาที", "800" to "0.8 วินาที", "1200" to "1.2 วินาที", "2000" to "2 วินาที"), "800") {
-            p.edit().putInt(Prefs.INTERVAL, it.toInt()).apply()
-        }
-        spinner("ขนาดซับ", Prefs.SUB_SIZE + "_s", listOf("16" to "เล็ก", "20" to "กลาง", "24" to "ใหญ่", "28" to "ใหญ่มาก"), "20") {
-            p.edit().putInt(Prefs.SUB_SIZE, it.toInt()).apply()
-        }
+            "claude_vision" to "Claude อ่านจอ+แปล (ดีที่สุด)",
+            "claude" to "Claude แปลข้อความ (ประหยัดกว่า)",
+            "google" to "Google (ฟรี, แปลตรงตัว)",
+            "mlkit" to "ออฟไลน์ในเครื่อง (ฟรี, ไม่ใช้เน็ต)"), "google")
+        label("ชื่อเกม (ช่วยให้ AI แปลถูกบริบท เช่น Final Fantasy Tactics)")
+        field(Prefs.GAME, "ชื่อเกม", password = false)
+        label("Claude API key จาก console.anthropic.com (จ่ายตามใช้ ประมาณ 1 สตางค์ต่อประโยคด้วย Haiku)")
+        field(Prefs.CLAUDE_KEY, "sk-ant-...", password = true)
+        spinner("รุ่น Claude", Prefs.CLAUDE_MODEL, listOf("claude-haiku-5-5" to "Haiku (เร็ว ถูก)", "claude-sonnet-5-5" to "Sonnet (แปลสวยกว่า แพงกว่า)"), "claude-haiku-5-5")
+        root.addView(button("ทดสอบ Claude key", Color.parseColor("#444A5A")) { testClaude() }, full())
+        switch("แสดงชื่อตัวละครในซับ", Prefs.NAMES, true)
+
+        // ---- voice
+        section("เสียงพากย์")
         switch("พากย์เสียงภาษาไทย", Prefs.VOICE, true)
+        spinner("แหล่งเสียง", Prefs.VOICE_SRC, listOf(
+            "auto" to "อัตโนมัติ (แนะนำ)",
+            "online" to "เสียงออนไลน์ในแอป (ไม่ต้องติดตั้งเพิ่ม)",
+            "device" to "เสียงในเครื่อง (ต้องมีแอปเสียงไทย)"), "auto")
         spinner("เสียงเกมตอนพากย์ไทย", Prefs.DUCK, listOf(
             "duck" to "หรี่เสียงเกมลง (แนะนำ)",
             "mute" to "ปิดเสียงเกมชั่วคราว",
             "off" to "ไม่ยุ่งกับเสียงเกม"), "duck")
-        switch("เริ่มด้วยโหมดแปลอัตโนมัติ", Prefs.AUTO, true)
         label("ความเร็วเสียงพูด")
         root.addView(SeekBar(this).apply {
             max = 15; progress = p.getInt(Prefs.RATE, 11) - 5
@@ -97,47 +100,42 @@ class MainActivity : Activity() {
                 override fun onStopTrackingTouch(s: SeekBar?) {}
             })
         })
+        root.addView(button("🔊 ทดลองฟังเสียง", Color.parseColor("#444A5A")) {
+            speech?.speak("ท่านเองก็เช่นกันนะ ท่านไซมอน ขอให้พระเจ้าคุ้มครอง", p.getInt(Prefs.RATE, 11) / 10f,
+                p.getString(Prefs.VOICE_SRC, "auto")!!)
+        }, full())
 
-        section("Claude AI (ไม่บังคับ)")
-        label("API key จาก console.anthropic.com — ใช้เมื่อเลือก \"แปลด้วย Claude\" (เสียเงินตามการใช้งาน)")
-        root.addView(EditText(this).apply {
-            setText(p.getString(Prefs.CLAUDE_KEY, ""))
-            hint = "sk-ant-..."
-            setTextColor(Color.WHITE); setHintTextColor(Color.GRAY)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setOnFocusChangeListener { v, has -> if (!has) p.edit().putString(Prefs.CLAUDE_KEY, (v as EditText).text.toString().trim()).apply() }
-            addTextChangedListener(object : android.text.TextWatcher {
-                override fun afterTextChanged(s: android.text.Editable?) { p.edit().putString(Prefs.CLAUDE_KEY, s.toString().trim()).apply() }
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            })
-        })
-        spinner("รุ่น Claude", Prefs.CLAUDE_MODEL, listOf("claude-haiku-5-5" to "Haiku (เร็ว ถูก)", "claude-sonnet-5-5" to "Sonnet (แม่นกว่า)"), "claude-haiku-5-5")
+        // ---- screen
+        section("หน้าจอ")
+        spinner("พื้นที่ที่อ่าน", Prefs.AREA + "_s", listOf("0" to "ทั้งจอ", "1" to "ครึ่งล่าง (กล่องข้อความ)", "2" to "1/3 ล่าง"), "0") {
+            p.edit().putInt(Prefs.AREA, it.toInt()).apply()
+        }
+        spinner("ตรวจจอทุก", Prefs.INTERVAL + "_s", listOf("500" to "0.5 วินาที", "800" to "0.8 วินาที", "1200" to "1.2 วินาที", "2000" to "2 วินาที"), "800") {
+            p.edit().putInt(Prefs.INTERVAL, it.toInt()).apply()
+        }
+        spinner("ขนาดซับ", Prefs.SUB_SIZE + "_s", listOf("16" to "เล็ก", "20" to "กลาง", "24" to "ใหญ่", "28" to "ใหญ่มาก"), "20") {
+            p.edit().putInt(Prefs.SUB_SIZE, it.toInt()).apply()
+        }
+        switch("เริ่มด้วยโหมดแปลอัตโนมัติ", Prefs.AUTO, true)
 
         section("เตรียมเครื่อง (ทำครั้งแรกครั้งเดียว)")
-        root.addView(button("1. อนุญาตให้แสดงทับแอปอื่น", blue) {
+        root.addView(button("อนุญาตให้แสดงทับแอปอื่น", blue) {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         }, full())
-        root.addView(button("2. ตั้งค่าเสียงพูดภาษาไทย", blue) { openTtsSettings() }, full())
-        root.addView(button("3. ดาวน์โหลดตัวแปลออฟไลน์ (~30MB)", blue) { downloadOffline() }, full())
-        root.addView(button("ทดลองฟังเสียง", Color.parseColor("#444A5A")) {
-            if (thaiVoice == true) tts?.speak("สวัสดีครับ ท่านผู้กล้า ยินดีต้อนรับสู่หมู่บ้านของเรา", TextToSpeech.QUEUE_FLUSH, null, "t")
-            else Toast.makeText(this, "ยังไม่มีเสียงภาษาไทย กดข้อ 2 ก่อน", Toast.LENGTH_LONG).show()
-        }, full())
+        root.addView(button("ดาวน์โหลดตัวแปลออฟไลน์ (~30MB, ไม่บังคับ)", blue) { downloadOffline() }, full())
 
         section("วิธีใช้")
         text("• กด \"เริ่มใช้งาน\" → กด \"เริ่มเลย/Start now\" ในหน้าต่างขออนุญาตบันทึกจอ\n" +
             "• เปิดเกมใน emulator — จะมีปุ่มลอยกลม ๆ บนจอ\n" +
-            "• โหมดอัตโนมัติ (ปุ่มสีเขียว): ข้อความในเกมเปลี่ยนเมื่อไหร่ แปลและพูดให้เอง\n" +
+            "• โหมดอัตโนมัติ (ปุ่มสีเขียว): มีบทพูดใหม่เมื่อไหร่ แปลและพูดให้เอง (บทเก่าที่ยังค้างบนจอจะไม่พูดซ้ำ)\n" +
             "• แตะปุ่มลอย = แปลทันที  |  กดค้าง = เปิด/ปิดโหมดอัตโนมัติ  |  ลากเพื่อย้ายปุ่ม\n" +
             "• แตะซับเพื่อซ่อน, ลากขึ้นลงเพื่อย้ายตำแหน่ง\n" +
-            "• ถ้าไปอ่านหลอดพลัง/ตัวเลขบนจอมั่ว ให้เลือกพื้นที่ \"ครึ่งล่าง\"\n" +
             "• ปิดการทำงาน: กดหยุด หรือกด \"ปิด\" ในแถบแจ้งเตือน", 14f, Color.LTGRAY)
 
-        tts = TextToSpeech(this) { st ->
-            thaiVoice = st == TextToSpeech.SUCCESS && (tts?.setLanguage(Locale("th", "TH")) ?: -2) >= 0
-            runOnUiThread { refresh() }
-        }
+        speech = Speech(this, AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build(), onDone = {},
+            onError = { m -> runOnUiThread { Toast.makeText(this, m, Toast.LENGTH_LONG).show() } })
+        status.postDelayed({ refresh() }, 1200)
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 5)
     }
@@ -147,7 +145,7 @@ class MainActivity : Activity() {
     private fun refresh() {
         val ov = Settings.canDrawOverlays(this)
         status.text = (if (ov) "✅ อนุญาตแสดงทับแอปอื่นแล้ว" else "❌ ยังไม่อนุญาตแสดงทับแอปอื่น (กดข้อ 1 ด้านล่าง)") + "\n" +
-            when (thaiVoice) { true -> "✅ มีเสียงพูดภาษาไทย"; false -> "❌ ยังไม่มีเสียงพูดภาษาไทย (กดข้อ 2 ด้านล่าง)"; null -> "… กำลังตรวจเสียงพูด" } + "\n" +
+            (if (speech?.deviceThai == true) "✅ เสียงไทย: ใช้เสียงในเครื่อง" else "✅ เสียงไทย: ใช้เสียงออนไลน์ในแอป (ต้องต่อเน็ต)") + "\n" +
             (if (OverlayService.running) "🟢 กำลังทำงาน — สลับไปเล่นเกมได้เลย" else "⚪ ยังไม่ได้เริ่ม")
     }
 
@@ -183,11 +181,32 @@ class MainActivity : Activity() {
         status.postDelayed({ refresh() }, 500)
     }
 
-    private fun openTtsSettings() {
-        try { startActivity(Intent("com.android.settings.TTS_SETTINGS")) } catch (e: Exception) {
-            try { startActivity(Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA)) } catch (_: Exception) {}
-        }
-        Toast.makeText(this, "เลือก Speech Services by Google → ติดตั้งเสียงภาษาไทย", Toast.LENGTH_LONG).show()
+    private fun testClaude() {
+        Toast.makeText(this, "กำลังทดสอบ...", Toast.LENGTH_SHORT).show()
+        Thread {
+            val msg = try {
+                val r = ThaiTranslator(this).claude(org.json.JSONArray().put(org.json.JSONObject().put("type", "text")
+                    .put("text", "Translate to Thai, reply with only the translation: You too, Simon.")), 60)
+                "✅ ใช้ได้! ตัวอย่าง: ${r.trim()}"
+            } catch (e: Exception) { "❌ ${e.message}" }
+            runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
+        }.start()
+    }
+
+    private fun field(key: String, hintText: String, password: Boolean) {
+        val p = Prefs.get(this)
+        root.addView(EditText(this).apply {
+            setText(p.getString(key, ""))
+            hint = hintText
+            setTextColor(Color.WHITE); setHintTextColor(Color.GRAY)
+            inputType = if (password) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD else InputType.TYPE_CLASS_TEXT
+            isSingleLine = true
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun afterTextChanged(s: android.text.Editable?) { p.edit().putString(key, s.toString().trim()).apply() }
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            })
+        })
     }
 
     private fun downloadOffline() {
@@ -200,7 +219,7 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    override fun onDestroy() { tts?.shutdown(); super.onDestroy() }
+    override fun onDestroy() { speech?.shutdown(); super.onDestroy() }
 
     // ------------------------------------------------------------------ tiny UI helpers
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
