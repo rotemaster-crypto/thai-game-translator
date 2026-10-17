@@ -247,7 +247,7 @@ class OverlayService : Service() {
             if (bmp == null) { if (manual) toast("ยังไม่ได้ภาพหน้าจอ ลองอีกครั้ง"); return }
             val p = Prefs.get(this)
             val lang = p.getString(Prefs.LANG, "en")!!
-            val engine = p.getString(Prefs.ENGINE, "google")!!
+            val engine = p.getString(Prefs.ENGINE, "ai_text")!!
             if (ocr == null || ocrLang != lang) { ocr?.close(); ocr = Ocr(lang); ocrLang = lang }
 
             // 1) fast on-device OCR: is there text, and is it new?

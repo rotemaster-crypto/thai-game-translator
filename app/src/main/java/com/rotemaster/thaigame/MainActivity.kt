@@ -68,13 +68,20 @@ class MainActivity : Activity() {
         section("การแปล")
         spinner("ภาษาในเกม", Prefs.LANG, listOf("en" to "อังกฤษ", "ja" to "ญี่ปุ่น", "zh" to "จีน", "ko" to "เกาหลี"), "en")
         spinner("แปลด้วย", Prefs.ENGINE, listOf(
-            "ai_vision" to "AI อ่านจอ+แปล (ดีที่สุด)",
-            "ai_text" to "AI แปลข้อความที่อ่านได้",
+            "ai_text" to "AI แปลข้อความ (เร็ว, แนะนำ)",
+            "ai_vision" to "AI อ่านจอ+แปล (แม่นสุด แต่ช้ากว่า)",
             "google" to "Google Translate (แปลตรงตัว)",
-            "mlkit" to "ออฟไลน์ในเครื่อง (ไม่ใช้เน็ต)"), "ai_vision")
+            "mlkit" to "ออฟไลน์ในเครื่อง (ไม่ใช้เน็ต)"), "ai_text")
         spinner("ตัว AI", Prefs.AI, listOf(
+            "box" to "กล่องที่บ้าน (Claude Max)",
             "gemini" to "Google Gemini (ฟรี)",
-            "claude" to "Claude (เสียเงิน, สำนวนดีที่สุด)"), "gemini")
+            "claude" to "Claude API key (จ่ายตามใช้)"), "box")
+
+        label("กล่องที่บ้าน — ติดตั้งในกล่องด้วยคำสั่ง (ดูวิธีในข้อความจาก Claude)")
+        boxAddr = field(Prefs.BOX_ADDR, "ที่อยู่กล่อง เช่น 192.168.1.50:8787", password = false)
+        field(Prefs.BOX_PIN, "PIN 4 หลัก (แสดงตอนติดตั้งเสร็จ)", password = false)
+        root.addView(button("🔎 ค้นหากล่องอัตโนมัติ", blue) { findBox() }, full())
+        spinner("รุ่น Claude ในกล่อง", Prefs.BOX_MODEL, listOf("haiku" to "Haiku (เร็ว)", "sonnet" to "Sonnet (สำนวนดีกว่า ช้ากว่า)"), "haiku")
         label("ชื่อเกม (ช่วยให้ AI แปลถูกบริบท เช่น Final Fantasy Tactics)")
         field(Prefs.GAME, "ชื่อเกม", password = false)
         label("Gemini API key (ฟรี) — สร้างที่ aistudio.google.com/apikey ด้วยบัญชี Google")
@@ -206,9 +213,27 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun field(key: String, hintText: String, password: Boolean) {
+    private var boxAddr: EditText? = null
+
+    private fun findBox() {
+        Toast.makeText(this, "กำลังค้นหากล่องใน Wi-Fi นี้... (ประมาณ 5-15 วินาที)", Toast.LENGTH_LONG).show()
+        Thread {
+            val found = try { BoxFinder.find() } catch (e: Exception) { emptyList() }
+            runOnUiThread {
+                if (found.isEmpty()) {
+                    Toast.makeText(this, "ไม่พบกล่อง — เช็กว่ากล่องเปิดอยู่ ติดตั้งแล้ว และ RP5 ต่อ Wi-Fi เดียวกัน", Toast.LENGTH_LONG).show()
+                } else {
+                    boxAddr?.setText(found.first())
+                    Toast.makeText(this, "พบกล่องที่ ${found.first()} ✅ ใส่ PIN แล้วกดทดสอบ AI", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun field(key: String, hintText: String, password: Boolean): EditText {
         val p = Prefs.get(this)
-        root.addView(EditText(this).apply {
+        val et = EditText(this)
+        root.addView(et.apply {
             setText(p.getString(key, ""))
             hint = hintText
             setTextColor(Color.WHITE); setHintTextColor(Color.GRAY)
@@ -220,6 +245,7 @@ class MainActivity : Activity() {
                 override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             })
         })
+        return et
     }
 
     private fun downloadOffline() {

@@ -29,7 +29,10 @@ import java.util.concurrent.TimeUnit
 object Prefs {
     const val LANG = "lang"            // ja | en | zh | ko
     const val ENGINE = "engine"        // ai_vision | ai_text | google | mlkit
-    const val AI = "ai"                // gemini (free) | claude (paid)
+    const val AI = "ai"                // box (home Linux box with Claude Code) | gemini (free) | claude (API key)
+    const val BOX_ADDR = "box_addr"    // 192.168.1.50:8787
+    const val BOX_PIN = "box_pin"
+    const val BOX_MODEL = "box_model"  // haiku | sonnet
     const val GEMINI_KEY = "gemini_key"
     const val GEMINI_MODEL = "gemini_model"
     const val CLAUDE_KEY = "claude_key"
@@ -217,6 +220,7 @@ You are a professional video game localizer translating game dialogue into Thai 
 Rules:
 - Translate meaning, tone and intent, never word-for-word. It must read like natural Thai dialogue written by a skilled Thai localizer, not machine translation.
 - Match the setting and each character's voice. Medieval / fantasy / historical settings: use ข้า, เจ้า, ท่าน, ข้าพเจ้า, กระหม่อม, เพคะ etc. as fits rank and relationship; formal speech for nobles, priests and knights; rough speech for mercenaries and villains. Modern settings: everyday spoken Thai with natural particles (นะ, สิ, ล่ะ, หรอก, เถอะ).
+- Use Thai particles that fit the speaker's gender and status (female: ค่ะ/คะ/นะคะ/เพคะ; male: ครับ/ขอรับ/พะยะค่ะ, or none for blunt characters). Address elders, clergy and royalty respectfully with ท่าน.
 - Proper nouns (people, places, factions, items): transliterate into Thai the way Thai fans would say them. Always reuse the glossary spelling when one is given.
 - Keep lines concise enough to read quickly as a subtitle.
 - The source text may come from OCR of a pixel font and may contain errors (for example '0' instead of ',', 'v' instead of 'y', split or merged words). Silently infer what was meant.
@@ -289,7 +293,8 @@ Rules:
 
     /** Send a prompt (+ optional JPEG screenshot) to the chosen AI. */
     fun ai(prompt: String, jpegB64: String?): String {
-        val provider = Prefs.get(ctx).getString(Prefs.AI, "gemini")!!
+        val provider = Prefs.get(ctx).getString(Prefs.AI, "box")!!
+        if (provider == "box") return box(prompt, jpegB64)
         if (provider == "claude") {
             val content = JSONArray()
             if (jpegB64 != null) content.put(JSONObject().put("type", "image").put("source",
@@ -298,6 +303,32 @@ Rules:
             return claude(content)
         }
         return gemini(prompt, jpegB64)
+    }
+
+    /** Home box: a Linux machine running box/server.py, which uses its Claude Code login (e.g. Claude Max). */
+    private fun box(prompt: String, jpegB64: String?): String {
+        val p = Prefs.get(ctx)
+        var addr = p.getString(Prefs.BOX_ADDR, "")!!.trim().removePrefix("http://").trimEnd('/')
+        if (addr.isEmpty()) throw IllegalStateException("ยังไม่ได้ตั้งที่อยู่กล่อง (กดค้นหากล่องอัตโนมัติ)")
+        if (!addr.contains(':')) addr += ":8787"
+        val body = JSONObject().put("system", style).put("prompt", prompt)
+            .put("model", p.getString(Prefs.BOX_MODEL, "haiku"))
+        if (jpegB64 != null) body.put("image", jpegB64)
+        val c = URL("http://$addr/ai").openConnection() as HttpURLConnection
+        c.requestMethod = "POST"; c.doOutput = true
+        c.connectTimeout = 4000; c.readTimeout = 130000
+        c.setRequestProperty("content-type", "application/json")
+        c.setRequestProperty("X-Pin", p.getString(Prefs.BOX_PIN, "")!!.trim())
+        try {
+            c.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        } catch (e: Exception) {
+            throw IllegalStateException("ติดต่อกล่องไม่ได้ (เปิดกล่องอยู่ไหม? อยู่ Wi-Fi เดียวกันไหม?)")
+        }
+        val code = c.responseCode
+        val txt = (if (code == 200) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
+        val j = try { JSONObject(txt) } catch (e: Exception) { JSONObject() }
+        if (code != 200) throw IllegalStateException("กล่อง: " + j.optString("error", "HTTP $code"))
+        return j.optString("text", "")
     }
 
     private fun gemini(prompt: String, jpegB64: String?): String {
@@ -396,3 +427,32 @@ fun similarity(a: String, b: String): Double {
 
 fun isAi(engine: String) = engine == "ai_vision" || engine == "ai_text" || engine == "claude" || engine == "claude_vision"
 fun isAiVision(engine: String) = engine == "ai_vision" || engine == "claude_vision"
+
+/** Finds the home box on the local network by probing /ping on port 8787 of every address in this /24. */
+object BoxFinder {
+    fun find(port: Int = 8787): List<String> {
+        val prefixes = java.util.Collections.list(java.net.NetworkInterface.getNetworkInterfaces())
+            .filter { it.isUp && !it.isLoopback }
+            .flatMap { java.util.Collections.list(it.inetAddresses) }
+            .filterIsInstance<java.net.Inet4Address>()
+            .filter { it.isSiteLocalAddress }
+            .map { it.hostAddress!!.substringBeforeLast('.') }
+            .distinct()
+        val found = java.util.Collections.synchronizedList(ArrayList<String>())
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(48)
+        for (pre in prefixes) for (i in 1..254) {
+            val host = "$pre.$i"
+            pool.execute {
+                try {
+                    val c = URL("http://$host:$port/ping").openConnection() as HttpURLConnection
+                    c.connectTimeout = 600; c.readTimeout = 1500
+                    if (c.responseCode == 200 && c.inputStream.bufferedReader().use { it.readText() }.contains("thai-translate-box"))
+                        found.add("$host:$port")
+                } catch (_: Exception) {}
+            }
+        }
+        pool.shutdown()
+        pool.awaitTermination(20, TimeUnit.SECONDS)
+        return found.sorted()
+    }
+}
