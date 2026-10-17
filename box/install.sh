@@ -52,7 +52,11 @@ fi
 
 say "[4/5] ตั้งให้เปิดเองทุกครั้งที่บูต"
 pkill -f "$APP_DIR/server.py" 2>/dev/null || true
-if command -v systemctl >/dev/null && sudo -n true 2>/dev/null || { command -v systemctl >/dev/null && sudo -v; }; then
+USE_SYSTEMD=0
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then
+  if sudo -n true 2>/dev/null || sudo -v; then USE_SYSTEMD=1; fi
+fi
+if [ "$USE_SYSTEMD" = 1 ]; then
   sudo tee /etc/systemd/system/thai-translate-box.service >/dev/null <<EOF
 [Unit]
 Description=Thai Game Translator box (Claude Code relay)
