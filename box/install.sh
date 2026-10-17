@@ -75,7 +75,11 @@ EOF
   sudo systemctl restart thai-translate-box.service
   if command -v ufw >/dev/null && sudo ufw status 2>/dev/null | grep -q "Status: active"; then sudo ufw allow $PORT/tcp >/dev/null; fi
 else
-  (crontab -l 2>/dev/null | grep -v thai-translate-box; echo "@reboot nohup python3 $APP_DIR/server.py >> $APP_DIR/server.log 2>&1 &") | crontab -
+  if command -v crontab >/dev/null; then
+    (crontab -l 2>/dev/null | grep -v thai-translate-box; echo "@reboot nohup python3 $APP_DIR/server.py >> $APP_DIR/server.log 2>&1 &") | crontab - || true
+  else
+    warn "ไม่มี systemd/cron — ถ้ารีบูตกล่อง ให้รันตัวติดตั้งนี้ใหม่"
+  fi
   nohup python3 "$APP_DIR/server.py" >> "$APP_DIR/server.log" 2>&1 &
 fi
 sleep 2
