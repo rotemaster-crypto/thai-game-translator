@@ -252,7 +252,7 @@ class OverlayService : Service() {
 
             // 1) fast on-device OCR: is there text, and is it new?
             val blocks = ocr!!.read(bmp)
-            if (blocks.isEmpty() && !(manual && engine == "claude_vision")) {
+            if (blocks.isEmpty() && !(manual && isAiVision(engine))) {
                 if (manual) toast("ไม่พบข้อความบนจอ")
                 return
             }
@@ -262,9 +262,9 @@ class OverlayService : Service() {
 
             // 2) translate
             var lines: List<Line> = emptyList()
-            if (engine == "claude_vision") {
-                lines = try { translator.claudeVision(bmp) } catch (e: Exception) {
-                    toast("Claude อ่านจอไม่สำเร็จ: ${e.message} → ใช้ Google แทน"); emptyList()
+            if (isAiVision(engine)) {
+                lines = try { translator.aiVision(bmp) } catch (e: Exception) {
+                    toast("AI อ่านจอไม่สำเร็จ: ${e.message} → ใช้ Google แทน"); emptyList()
                 }
             }
             if (lines.isEmpty() && blocks.isNotEmpty()) {
@@ -410,7 +410,16 @@ class OverlayService : Service() {
         focusReq = null
     }
 
-    private fun toast(msg: String) = main.post { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
+    private var lastToast = ""
+    private var lastToastAt = 0L
+
+    /** Same message at most once every 20 s, so a missing key or offline network doesn't spam the screen. */
+    private fun toast(msg: String) {
+        val now = System.currentTimeMillis()
+        if (msg == lastToast && now - lastToastAt < 20000) return
+        lastToast = msg; lastToastAt = now
+        main.post { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
+    }
 
     override fun onDestroy() {
         running = false

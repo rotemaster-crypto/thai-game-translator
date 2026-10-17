@@ -28,7 +28,10 @@ import java.util.concurrent.TimeUnit
 
 object Prefs {
     const val LANG = "lang"            // ja | en | zh | ko
-    const val ENGINE = "engine"        // claude_vision | claude | google | mlkit
+    const val ENGINE = "engine"        // ai_vision | ai_text | google | mlkit
+    const val AI = "ai"                // gemini (free) | claude (paid)
+    const val GEMINI_KEY = "gemini_key"
+    const val GEMINI_MODEL = "gemini_model"
     const val CLAUDE_KEY = "claude_key"
     const val CLAUDE_MODEL = "claude_model"
     const val GAME = "game"            // game title, gives the AI context
@@ -142,8 +145,8 @@ class ThaiTranslator(private val ctx: Context) {
 
     // ------------------------------------------------------------------ text translation (from OCR)
     fun translateLines(lines: List<Line>, src: String, engine: String, log: (String) -> Unit) {
-        if (engine == "claude" || engine == "claude_vision") {
-            try { claudeText(lines); return } catch (e: Exception) { log("Claude ไม่สำเร็จ (${e.message}) → ใช้ Google แทน") }
+        if (isAi(engine)) {
+            try { aiText(lines); return } catch (e: Exception) { log("AI แปลไม่สำเร็จ (${e.message}) → ใช้ Google แทน") }
         }
         for (l in lines) {
             l.thai = simple(l.original, src, engine, log)
@@ -239,12 +242,12 @@ Rules:
         return sb.toString()
     }
 
-    private fun claudeText(lines: List<Line>) {
+    private fun aiText(lines: List<Line>) {
         val arr = JSONArray()
         for (l in lines) arr.put(JSONObject().put("speaker", l.speaker).put("text", l.original))
         val prompt = context() + "\nTranslate these OCR'd lines. Return ONLY a JSON array with one object per input line, same order: " +
             "[{\"speaker_th\":\"Thai speaker name or empty\",\"thai\":\"Thai translation\"}]\nInput:\n" + arr.toString()
-        val out = parseArray(claude(JSONArray().put(JSONObject().put("type", "text").put("text", prompt))))
+        val out = parseArray(ai(prompt, null))
         if (out.length() != lines.size) throw IllegalStateException("จำนวนบรรทัดไม่ตรง")
         for (i in lines.indices) {
             val o = out.getJSONObject(i)
@@ -255,7 +258,7 @@ Rules:
     }
 
     /** AI reads the screenshot and translates in one step. */
-    fun claudeVision(bmp: Bitmap): List<Line> {
+    fun aiVision(bmp: Bitmap): List<Line> {
         val scale = minOf(1f, 1280f / bmp.width)
         val small = if (scale < 1f) Bitmap.createScaledBitmap(bmp, (bmp.width * scale).toInt(), (bmp.height * scale).toInt(), true) else bmp
         val bos = ByteArrayOutputStream()
@@ -266,11 +269,7 @@ Rules:
             "Join the lines of one box into one sentence. Order: the box the player most likely read first comes first.\n" +
             "Return ONLY a JSON array: [{\"speaker\":\"name shown in the box or empty\",\"original\":\"exact text\"," +
             "\"speaker_th\":\"Thai name or empty\",\"thai\":\"Thai translation\"}]. Return [] if there is no dialogue."
-        val content = JSONArray()
-            .put(JSONObject().put("type", "image").put("source",
-                JSONObject().put("type", "base64").put("media_type", "image/jpeg").put("data", b64)))
-            .put(JSONObject().put("type", "text").put("text", prompt))
-        val out = parseArray(claude(content))
+        val out = parseArray(ai(prompt, b64))
         val res = ArrayList<Line>()
         for (i in 0 until out.length()) {
             val o = out.optJSONObject(i) ?: continue
@@ -286,6 +285,67 @@ Rules:
         val a = txt.indexOf('['); val b = txt.lastIndexOf(']')
         if (a < 0 || b < a) throw IllegalStateException("AI ตอบรูปแบบไม่ถูกต้อง")
         return JSONArray(txt.substring(a, b + 1))
+    }
+
+    /** Send a prompt (+ optional JPEG screenshot) to the chosen AI. */
+    fun ai(prompt: String, jpegB64: String?): String {
+        val provider = Prefs.get(ctx).getString(Prefs.AI, "gemini")!!
+        if (provider == "claude") {
+            val content = JSONArray()
+            if (jpegB64 != null) content.put(JSONObject().put("type", "image").put("source",
+                JSONObject().put("type", "base64").put("media_type", "image/jpeg").put("data", jpegB64)))
+            content.put(JSONObject().put("type", "text").put("text", prompt))
+            return claude(content)
+        }
+        return gemini(prompt, jpegB64)
+    }
+
+    private fun gemini(prompt: String, jpegB64: String?): String {
+        val p = Prefs.get(ctx)
+        val key = p.getString(Prefs.GEMINI_KEY, "")!!.trim()
+        if (key.isEmpty()) throw IllegalStateException("ยังไม่ได้ใส่ Gemini API key")
+        val parts = JSONArray()
+        if (jpegB64 != null) parts.put(JSONObject().put("inline_data", JSONObject().put("mime_type", "image/jpeg").put("data", jpegB64)))
+        parts.put(JSONObject().put("text", prompt))
+        val body = JSONObject()
+            .put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", style))))
+            .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
+            .put("generationConfig", JSONObject().put("temperature", 0.4).put("responseMimeType", "application/json"))
+            .toString()
+        val chosen = p.getString(Prefs.GEMINI_MODEL, "gemini-3.6-flash")!!
+        val models = listOf(chosen, "gemini-flash-latest", "gemini-3.5-flash-lite").distinct()
+        var lastErr = "ไม่ทราบสาเหตุ"
+        for (m in models) {
+            val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent").openConnection() as HttpURLConnection
+            c.requestMethod = "POST"; c.doOutput = true
+            c.connectTimeout = 10000; c.readTimeout = 60000
+            c.setRequestProperty("x-goog-api-key", key)
+            c.setRequestProperty("content-type", "application/json")
+            c.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            val code = c.responseCode
+            if (code == 200) {
+                val resp = JSONObject(c.inputStream.bufferedReader().use { it.readText() })
+                val cand = resp.optJSONArray("candidates")?.optJSONObject(0)
+                val ps = cand?.optJSONObject("content")?.optJSONArray("parts") ?: throw IllegalStateException("Gemini ไม่ตอบ (อาจถูกบล็อกเนื้อหา)")
+                val sb = StringBuilder()
+                for (i in 0 until ps.length()) {
+                    val part = ps.getJSONObject(i)
+                    if (!part.optBoolean("thought", false)) sb.append(part.optString("text", ""))
+                }
+                return sb.toString()
+            }
+            val err = c.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+            val msg = try { JSONObject(err).getJSONObject("error").getString("message") } catch (e: Exception) { err.take(120) }
+            lastErr = when (code) {
+                429 -> "ใช้โควตาฟรีเต็มแล้ว รอสักครู่"
+                400, 403 -> if (msg.contains("API key", true)) "API key ไม่ถูกต้อง" else msg
+                else -> "HTTP $code: $msg"
+            }
+            if (code == 400 && msg.contains("API key", true)) break
+            if (code == 403) break
+            // 404 (model retired) / 429 (quota) / 5xx: try the next model
+        }
+        throw IllegalStateException("Gemini: $lastErr")
     }
 
     fun claude(content: JSONArray, maxTokens: Int = 1200): String {
@@ -333,3 +393,6 @@ fun similarity(a: String, b: String): Double {
     }
     return 1.0 - prev[y.length].toDouble() / maxOf(x.length, y.length)
 }
+
+fun isAi(engine: String) = engine == "ai_vision" || engine == "ai_text" || engine == "claude" || engine == "claude_vision"
+fun isAiVision(engine: String) = engine == "ai_vision" || engine == "claude_vision"

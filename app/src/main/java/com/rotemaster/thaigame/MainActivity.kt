@@ -68,16 +68,28 @@ class MainActivity : Activity() {
         section("การแปล")
         spinner("ภาษาในเกม", Prefs.LANG, listOf("en" to "อังกฤษ", "ja" to "ญี่ปุ่น", "zh" to "จีน", "ko" to "เกาหลี"), "en")
         spinner("แปลด้วย", Prefs.ENGINE, listOf(
-            "claude_vision" to "Claude อ่านจอ+แปล (ดีที่สุด)",
-            "claude" to "Claude แปลข้อความ (ประหยัดกว่า)",
-            "google" to "Google (ฟรี, แปลตรงตัว)",
-            "mlkit" to "ออฟไลน์ในเครื่อง (ฟรี, ไม่ใช้เน็ต)"), "google")
+            "ai_vision" to "AI อ่านจอ+แปล (ดีที่สุด)",
+            "ai_text" to "AI แปลข้อความที่อ่านได้",
+            "google" to "Google Translate (แปลตรงตัว)",
+            "mlkit" to "ออฟไลน์ในเครื่อง (ไม่ใช้เน็ต)"), "ai_vision")
+        spinner("ตัว AI", Prefs.AI, listOf(
+            "gemini" to "Google Gemini (ฟรี)",
+            "claude" to "Claude (เสียเงิน, สำนวนดีที่สุด)"), "gemini")
         label("ชื่อเกม (ช่วยให้ AI แปลถูกบริบท เช่น Final Fantasy Tactics)")
         field(Prefs.GAME, "ชื่อเกม", password = false)
-        label("Claude API key จาก console.anthropic.com (จ่ายตามใช้ ประมาณ 1 สตางค์ต่อประโยคด้วย Haiku)")
+        label("Gemini API key (ฟรี) — สร้างที่ aistudio.google.com/apikey ด้วยบัญชี Google")
+        field(Prefs.GEMINI_KEY, "AIza...", password = true)
+        root.addView(button("เปิดหน้าสร้าง Gemini key", blue) {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/apikey")))
+        }, full())
+        spinner("รุ่น Gemini", Prefs.GEMINI_MODEL, listOf(
+            "gemini-3.6-flash" to "Flash (แนะนำ)",
+            "gemini-3.8-flash" to "Flash รุ่นใหม่สุด",
+            "gemini-3.5-flash-lite" to "Flash-Lite (เร็วสุด, โควตาเยอะ)"), "gemini-3.6-flash")
+        label("Claude API key (ไม่บังคับ, เสียเงิน) — console.anthropic.com")
         field(Prefs.CLAUDE_KEY, "sk-ant-...", password = true)
         spinner("รุ่น Claude", Prefs.CLAUDE_MODEL, listOf("claude-haiku-5-5" to "Haiku (เร็ว ถูก)", "claude-sonnet-5-5" to "Sonnet (แปลสวยกว่า แพงกว่า)"), "claude-haiku-5-5")
-        root.addView(button("ทดสอบ Claude key", Color.parseColor("#444A5A")) { testClaude() }, full())
+        root.addView(button("ทดสอบ AI", Color.parseColor("#444A5A")) { testClaude() }, full())
         switch("แสดงชื่อตัวละครในซับ", Prefs.NAMES, true)
 
         // ---- voice
@@ -185,9 +197,10 @@ class MainActivity : Activity() {
         Toast.makeText(this, "กำลังทดสอบ...", Toast.LENGTH_SHORT).show()
         Thread {
             val msg = try {
-                val r = ThaiTranslator(this).claude(org.json.JSONArray().put(org.json.JSONObject().put("type", "text")
-                    .put("text", "Translate to Thai, reply with only the translation: You too, Simon.")), 60)
-                "✅ ใช้ได้! ตัวอย่าง: ${r.trim()}"
+                val r = ThaiTranslator(this).ai("Translate this Final Fantasy Tactics line for a Thai subtitle. " +
+                    "Return ONLY a JSON array: [{\"thai\":\"...\"}]\nOvelia: You too, Simon.", null)
+                val th = try { org.json.JSONArray(r.substring(r.indexOf('['), r.lastIndexOf(']') + 1)).getJSONObject(0).getString("thai") } catch (e: Exception) { r.trim() }
+                "✅ ใช้ได้! ตัวอย่าง: $th"
             } catch (e: Exception) { "❌ ${e.message}" }
             runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
         }.start()
